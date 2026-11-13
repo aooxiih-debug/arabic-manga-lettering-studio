@@ -10,33 +10,53 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ChapterChapterIdRouteImport } from './routes/chapter.$chapterId'
+import { Route as EditChapterIdRouteImport } from './routes/edit.$chapterId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChapterChapterIdRoute = ChapterChapterIdRouteImport.update({
+  id: '/chapter/$chapterId',
+  path: '/chapter/$chapterId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EditChapterIdRoute = EditChapterIdRouteImport.update({
+  id: '/edit/$chapterId',
+  path: '/edit/$chapterId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/chapter/$chapterId': typeof ChapterChapterIdRoute
+  '/edit/$chapterId': typeof EditChapterIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/chapter/$chapterId': typeof ChapterChapterIdRoute
+  '/edit/$chapterId': typeof EditChapterIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/chapter/$chapterId': typeof ChapterChapterIdRoute
+  '/edit/$chapterId': typeof EditChapterIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/chapter/$chapterId' | '/edit/$chapterId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/chapter/$chapterId' | '/edit/$chapterId'
+  id: '__root__' | '/' | '/chapter/$chapterId' | '/edit/$chapterId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ChapterChapterIdRoute: typeof ChapterChapterIdRoute
+  EditChapterIdRoute: typeof EditChapterIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +68,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/chapter/$chapterId': {
+      id: '/chapter/$chapterId'
+      path: '/chapter/$chapterId'
+      fullPath: '/chapter/$chapterId'
+      preLoaderRoute: typeof ChapterChapterIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/edit/$chapterId': {
+      id: '/edit/$chapterId'
+      path: '/edit/$chapterId'
+      fullPath: '/edit/$chapterId'
+      preLoaderRoute: typeof EditChapterIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ChapterChapterIdRoute: ChapterChapterIdRoute,
+  EditChapterIdRoute: EditChapterIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
