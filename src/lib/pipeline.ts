@@ -1,3 +1,4 @@
+import { DAILY_LIMIT_MESSAGE } from "./ai/gemini-errors";
 import { translatePageFn } from "./ai/translate.functions";
 import { getChapter, getPage, getPageImage, getPages, savePage } from "./db";
 import { DEFAULT_FONT } from "./fonts";
@@ -12,7 +13,7 @@ export type PipelineState = {
   currentPageId?: string | undefined;
   done: number;
   total: number;
-  /** Set when the AI refuses all further work (credits, permissions); the queue stops. */
+  /** Set when the AI refuses all further work (daily limit, bad key, permissions); the queue stops. */
   blocked?: string | undefined;
 };
 
@@ -103,7 +104,10 @@ async function processOne(page: Page, notes: string): Promise<"ok" | "stop"> {
     try {
       res = await translatePageFn({ data: { imageDataUrl, notes, previousLines: lines } });
     } catch (e) {
-      res = { ok: false, status: 503, message: e instanceof Error ? e.message : "انقطع الاتصال" };
+      const raw = e instanceof Error ? e.message : "";
+      res = /\b429\b/.test(raw)
+        ? { ok: false, status: 429, message: DAILY_LIMIT_MESSAGE }
+        : { ok: false, status: 503, message: "انقطع الاتصال بالخادم، حاول مرة أخرى." };
     }
     if (res.ok) {
       await ensureFonts([DEFAULT_FONT]);
@@ -115,14 +119,15 @@ async function processOne(page: Page, notes: string): Promise<"ok" | "stop"> {
       URL.revokeObjectURL(img.src);
       return "ok";
     }
-    const retryable = res.status === 429 || res.status >= 500;
+    // 429 = the Gemini key's daily quota is used up; retrying today is pointless.
+    const retryable = res.status >= 500;
     if (retryable && attempt < 3) {
       await sleep(4000 * 2 ** attempt + Math.random() * 1500);
       continue;
     }
     const fresh = (await getPage(page.id)) ?? page;
     await savePage({ ...fresh, status: "error", error: res.message });
-    if (res.status === 402 || res.status === 403 || res.status === 401) {
+    if (res.status === 429 || res.status === 402 || res.status === 403 || res.status === 401) {
       setState({ blocked: res.message });
       return "stop";
     }

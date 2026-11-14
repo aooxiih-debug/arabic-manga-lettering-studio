@@ -32,7 +32,7 @@ use the editor.
 ## Project rules
 
 - All chapters, pages, images and uploaded fonts are stored in the browser's IndexedDB (`src/lib/db.ts`); there is no backend database — the user chose browser-only storage.
-- Page AI analysis (bubble detection + Arabic translation) runs only in `src/lib/ai/translate-page.server.ts` behind the `translatePageFn` server function; the client sends a downscaled JPEG and never sees the API key.
+- Page AI analysis (bubble detection + Arabic translation) runs only in `src/lib/ai/translate-page.server.ts` behind the `translatePageFn` server function, calling Google's native Gemini `generateContent` endpoint with the user's `GEMINI_API_KEY` in `x-goog-api-key` (no key-format checks; the OpenAI-compatible endpoint rejects the user's key type); the client sends a downscaled JPEG and never sees the key.
 - Box geometry is stored as 0–1 fractions of the page and font size in source-image pixels, so the editor and exports scale identically.
 - The editor preview and exported images share `layoutBox`/`wrapLines` in `src/lib/text-layout.ts`; change text layout only there so on-screen and downloaded pages never drift apart.
-- Pages are processed sequentially by `src/lib/pipeline.ts` so each page can use previous lines for consistent names/tone; 402/403/401 stop the whole queue.
+- Pages are processed sequentially by `src/lib/pipeline.ts` so each page can use previous lines for consistent names/tone; 429/402/403/401 stop the whole queue (429 shows the daily-limit message from `src/lib/ai/gemini-errors.ts`).

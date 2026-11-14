@@ -1,10 +1,8 @@
-import { createOpenAI } from "@ai-sdk/openai";
-import { APICallError, Output, jsonSchema, streamText } from "ai";
+import { mapGeminiError } from "./gemini-errors";
 
-import { createLovableAiGatewayRunIdFetch } from "./run-id";
-
-const GATEWAY_URL = "https://ai.gateway.lovable.dev/v1";
-const MODEL = "openai/gpt-6-astra";
+/** Native Gemini endpoint (not the OpenAI-compatible one, which rejects "AQ." keys). */
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const MODEL = "gemini-2.5-flash";
 
 export type DetectedBubble = {
   x1: number;
@@ -20,84 +18,64 @@ export type TranslatePageResult =
   | { ok: true; bubbles: DetectedBubble[] }
   | { ok: false; status: number; message: string };
 
-const pageSchema = jsonSchema<{ bubbles: DetectedBubble[] }>({
-  type: "object",
-  additionalProperties: false,
+type GeminiBlock = {
+  box_2d: number[];
+  original: string;
+  arabic: string;
+  kind: DetectedBubble["kind"];
+};
+
+const responseSchema = {
+  type: "OBJECT",
   required: ["bubbles"],
   properties: {
     bubbles: {
-      type: "array",
+      type: "ARRAY",
       items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["x1", "y1", "x2", "y2", "original", "arabic", "kind"],
+        type: "OBJECT",
+        required: ["box_2d", "original", "arabic", "kind"],
+        propertyOrdering: ["box_2d", "original", "arabic", "kind"],
         properties: {
-          x1: { type: "number" },
-          y1: { type: "number" },
-          x2: { type: "number" },
-          y2: { type: "number" },
-          original: { type: "string" },
-          arabic: { type: "string" },
-          kind: { type: "string", enum: ["speech", "thought", "narration", "sfx", "sign"] },
+          box_2d: { type: "ARRAY", items: { type: "INTEGER" } },
+          original: { type: "STRING" },
+          arabic: { type: "STRING" },
+          kind: { type: "STRING", enum: ["speech", "thought", "narration", "sfx", "sign"] },
         },
       },
     },
   },
-});
+};
 
 const INSTRUCTIONS = `You are a professional manga, manhwa and comics letterer and Arabic translator.
 
 TASK 1 — DETECTION
 Find every block of English text on the page: speech bubbles, thought bubbles, narration boxes, signs and sound effects.
-For each block return a TIGHT bounding box around the lettering itself (not the whole bubble outline), as integers normalized 0-1000:
-x1,y1 = top-left corner, x2,y2 = bottom-right corner, where x is relative to image width and y to image height.
+For each block return "box_2d": a TIGHT bounding box around the lettering itself (not the whole bubble outline),
+as [ymin, xmin, ymax, xmax] integers normalized to 0-1000.
 Each separate bubble is a separate block. Never merge two bubbles. List blocks in natural reading order of the page.
 Ignore page numbers, watermarks, scanlation credits and website URLs.
 
 TASK 2 — TRANSLATION
 "original": the exact English text of the block, with line breaks replaced by spaces.
-"arabic": a natural, expressive Arabic line, the way a professional Arabic comic would read.
-- Use clear simplified Modern Standard Arabic that sounds alive, not stiff or literal.
-- Keep the emotion, humor, slang energy and character voice. Shouting stays punchy with "!".
-- Keep it concise so it fits the same bubble; similar length to the English.
+"arabic": the Arabic line for that block, written as natural manga dialogue.
+- Use simple Modern Standard Arabic (فصحى مبسطة) in a natural manga dialogue style — never stiff, formal or word-for-word.
+- Keep sentences short so they fit inside the speech bubble; no longer than the English.
+- Keep each character's tone: a hothead stays blunt, a shy character stays hesitant, a joker stays playful.
+- Keep the emotion and energy. Shouting stays punchy with "!".
 - Transliterate names consistently and keep honorifics meaningful.
-- Sound effects: give a short expressive Arabic equivalent.
+- Sound effects: a short expressive Arabic equivalent.
 - Never add translator notes, quotes or explanations.`;
-
-function parseGatewayError(error: unknown): { status: number; message: string } {
-  const candidates: unknown[] = [error];
-  if (error && typeof error === "object" && "cause" in error) candidates.push((error as { cause: unknown }).cause);
-  for (const candidate of candidates) {
-    if (APICallError.isInstance(candidate)) {
-      let message = candidate.message;
-      try {
-        const body = JSON.parse(candidate.responseBody ?? "{}");
-        message = body?.error?.message ?? body?.message ?? message;
-      } catch {
-        // keep SDK message
-      }
-      return { status: candidate.statusCode ?? 500, message };
-    }
-  }
-  const message = error instanceof Error ? error.message : "تعذّر تحليل الصفحة";
-  return { status: 500, message };
-}
 
 export async function translatePage(input: {
   imageDataUrl: string;
   notes: string;
   previousLines: string[];
 }): Promise<TranslatePageResult> {
-  const apiKey = process.env['LOVABLE_API_KEY'];
-  if (!apiKey) return { ok: false, status: 401, message: "مفتاح الذكاء الاصطناعي غير مهيأ." };
+  const apiKey = process.env["GEMINI_API_KEY"]?.trim().replace(/^["']|["']$/g, "");
+  if (!apiKey) return { ok: false, status: 401, message: "مفتاح Gemini غير مهيأ." };
 
-  const runIdFetch = createLovableAiGatewayRunIdFetch(undefined);
-  const provider = createOpenAI({
-    baseURL: GATEWAY_URL,
-    apiKey,
-    headers: { "Lovable-API-Key": apiKey, "X-Lovable-AIG-SDK": "vercel-ai-sdk" },
-    fetch: runIdFetch.fetch,
-  });
+  const match = /^data:(image\/[a-z+.-]+);base64,(.+)$/i.exec(input.imageDataUrl);
+  if (!match) return { ok: false, status: 400, message: "صيغة الصورة غير مدعومة" };
 
   const contextParts: string[] = [];
   if (input.notes.trim()) contextParts.push(`Translator notes for this series (names, tone, glossary):\n${input.notes.trim()}`);
@@ -107,44 +85,53 @@ export async function translatePage(input: {
   contextParts.push("Detect and translate every English text block on this page.");
 
   try {
-    const result = streamText({
-      model: provider.responses(MODEL),
-      instructions: INSTRUCTIONS,
-      maxRetries: 0,
-      output: Output.object({ schema: pageSchema }),
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: contextParts.join("\n\n") },
-            { type: "image", image: new URL(input.imageDataUrl) },
-          ],
+    const res = await fetch(`${GEMINI_BASE}/${MODEL}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: INSTRUCTIONS }] },
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { inlineData: { mimeType: match[1], data: match[2] } },
+              { text: contextParts.join("\n\n") },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema,
+          temperature: 0.4,
+          thinkingConfig: { thinkingBudget: 1024 },
         },
-      ],
-      providerOptions: {
-        openai: {
-          forceReasoning: true,
-          reasoningEffort: "low",
-          reasoningSummary: "auto",
-          store: false,
-          include: ["reasoning.encrypted_content"],
-        },
-      },
+      }),
     });
+    const text = await res.text();
+    if (!res.ok) {
+      console.error("Gemini error", res.status, text.slice(0, 500));
+      return { ok: false, ...mapGeminiError(res.status, text) };
+    }
 
-    const output = await result.output;
-    const bubbles = (output?.bubbles ?? [])
-      .map((b) => ({
-        ...b,
-        x1: Math.max(0, Math.min(1000, b.x1)),
-        y1: Math.max(0, Math.min(1000, b.y1)),
-        x2: Math.max(0, Math.min(1000, b.x2)),
-        y2: Math.max(0, Math.min(1000, b.y2)),
-      }))
+    const json = JSON.parse(text);
+    const candidate = json?.candidates?.[0];
+    if (!candidate?.content?.parts) {
+      const reason = json?.promptFeedback?.blockReason ?? candidate?.finishReason ?? "unknown";
+      return { ok: false, status: 422, message: `رفض Gemini تحليل هذه الصفحة (${reason})` };
+    }
+    const raw = candidate.content.parts.map((p: { text?: string }) => p.text ?? "").join("");
+    const parsed = JSON.parse(raw) as { bubbles?: GeminiBlock[] };
+    const clamp = (n: number) => Math.max(0, Math.min(1000, Number(n) || 0));
+    const bubbles = (parsed.bubbles ?? [])
+      .filter((b) => Array.isArray(b.box_2d) && b.box_2d.length === 4)
+      .map((b) => {
+        const [ymin, xmin, ymax, xmax] = b.box_2d.map(clamp) as [number, number, number, number];
+        return { x1: xmin, y1: ymin, x2: xmax, y2: ymax, original: b.original ?? "", arabic: b.arabic ?? "", kind: b.kind };
+      })
       .filter((b) => b.x2 > b.x1 && b.y2 > b.y1 && b.arabic.trim().length > 0);
     return { ok: true, bubbles };
   } catch (error) {
     console.error("translatePage failed", error);
-    return { ok: false, ...parseGatewayError(error) };
+    return { ok: false, status: 500, message: error instanceof Error ? error.message : "تعذّر تحليل الصفحة" };
   }
 }
