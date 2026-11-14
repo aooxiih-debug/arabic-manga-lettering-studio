@@ -2,7 +2,12 @@ import { mapGeminiError } from "./gemini-errors";
 
 /** Native Gemini endpoint (not the OpenAI-compatible one, which rejects "AQ." keys). */
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
-const MODEL = "gemini-2.5-flash";
+/**
+ * Tried in order. gemini-2.5-flash is closed to new keys; newer models are sometimes overloaded (503)
+ * or hang, so a busy/unknown model falls through to the next one.
+ */
+const MODELS = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.8-flash"];
+const REQUEST_TIMEOUT_MS = 75_000;
 
 export type DetectedBubble = {
   x1: number;
@@ -60,6 +65,7 @@ TASK 2 — TRANSLATION
 "arabic": the Arabic line for that block, written as natural manga dialogue.
 - Use simple Modern Standard Arabic (فصحى مبسطة) in a natural manga dialogue style — never stiff, formal or word-for-word.
 - Keep sentences short so they fit inside the speech bubble; no longer than the English.
+- Do not add diacritics (tashkeel); use one only where a word would otherwise be ambiguous.
 - Keep each character's tone: a hothead stays blunt, a shy character stays hesitant, a joker stays playful.
 - Keep the emotion and energy. Shouting stays punchy with "!".
 - Transliterate names consistently and keep honorifics meaningful.
@@ -84,34 +90,53 @@ export async function translatePage(input: {
   }
   contextParts.push("Detect and translate every English text block on this page.");
 
-  try {
-    const res = await fetch(`${GEMINI_BASE}/${MODEL}:generateContent`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: INSTRUCTIONS }] },
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { inlineData: { mimeType: match[1], data: match[2] } },
-              { text: contextParts.join("\n\n") },
-            ],
-          },
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: INSTRUCTIONS }] },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { inlineData: { mimeType: match[1], data: match[2] } },
+          { text: contextParts.join("\n\n") },
         ],
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema,
-          temperature: 0.4,
-          thinkingConfig: { thinkingBudget: 1024 },
-        },
-      }),
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      console.error("Gemini error", res.status, text.slice(0, 500));
-      return { ok: false, ...mapGeminiError(res.status, text) };
+      },
+    ],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema,
+      temperature: 0.4,
+      thinkingConfig: { thinkingBudget: 1024 },
+    },
+  });
+
+  try {
+    let text = "";
+    let lastError: { status: number; message: string } | undefined;
+    for (const model of MODELS) {
+      let res: Response;
+      try {
+        res = await fetch(`${GEMINI_BASE}/${model}:generateContent`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+          body,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch (error) {
+        console.error("Gemini request failed", model, error);
+        lastError = { status: 503, message: "Gemini مشغول حالياً، حاول بعد قليل." };
+        continue;
+      }
+      text = await res.text();
+      if (res.ok) {
+        lastError = undefined;
+        break;
+      }
+      console.error("Gemini error", model, res.status, text.slice(0, 500));
+      lastError = mapGeminiError(res.status, text);
+      // Busy or unavailable model: try the next one. Anything else (key, quota) applies to all models.
+      if (res.status !== 404 && res.status < 500) break;
     }
+    if (lastError) return { ok: false, ...lastError };
 
     const json = JSON.parse(text);
     const candidate = json?.candidates?.[0];
