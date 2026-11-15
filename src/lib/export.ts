@@ -1,7 +1,7 @@
 import JSZip from "jszip";
 
 import { registerCustomFonts } from "./custom-fonts";
-import { getPageImage } from "./db";
+import { getDisplayImage } from "./db";
 import { imageToCanvas, loadImage } from "./image-utils";
 import { drawBox, ensureFonts } from "./text-layout";
 import type { Page } from "./types";
@@ -9,7 +9,7 @@ import type { Page } from "./types";
 export type ExportFormat = "png" | "jpeg";
 
 export async function renderPage(page: Page, format: ExportFormat): Promise<Blob> {
-  const blob = await getPageImage(page.id);
+  const blob = await getDisplayImage(page.id);
   if (!blob) throw new Error("الصورة غير موجودة");
   const img = await loadImage(blob);
   await registerCustomFonts();

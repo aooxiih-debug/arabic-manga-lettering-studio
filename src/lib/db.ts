@@ -36,7 +36,11 @@ export async function deleteChapter(id: string) {
   const chapter = await getChapter(id);
   if (chapter) {
     await Promise.all(
-      chapter.pageIds.flatMap((pid) => [del(`page:${pid}`, db()), del(`image:${pid}`, db())]),
+      chapter.pageIds.flatMap((pid) => [
+        del(`page:${pid}`, db()),
+        del(`image:${pid}`, db()),
+        del(`clean:${pid}`, db()),
+      ]),
     );
   }
   await del(`chapter:${id}`, db());
@@ -60,10 +64,26 @@ export async function deletePage(chapterId: string, pageId: string) {
   if (chapter) await saveChapter({ ...chapter, pageIds: chapter.pageIds.filter((p) => p !== pageId) });
   await del(`page:${pageId}`, db());
   await del(`image:${pageId}`, db());
+  await del(`clean:${pageId}`, db());
 }
 
 export const getPageImage = (pageId: string) => get<Blob>(`image:${pageId}`, db());
 export const savePageImage = (pageId: string, blob: Blob) => set(`image:${pageId}`, blob, db());
+
+/** Page picture after Magic Eraser edits; the untouched upload stays in `image:` for AI analysis and "show original". */
+export const getCleanImage = (pageId: string) => get<Blob>(`clean:${pageId}`, db());
+export async function saveCleanImage(pageId: string, blob: Blob) {
+  await set(`clean:${pageId}`, blob, db());
+  emit(`image:${pageId}`);
+}
+export async function deleteCleanImage(pageId: string) {
+  await del(`clean:${pageId}`, db());
+  emit(`image:${pageId}`);
+}
+/** What the reader sees and what gets exported: the erased version when there is one. */
+export async function getDisplayImage(pageId: string) {
+  return (await getCleanImage(pageId)) ?? (await getPageImage(pageId));
+}
 
 export async function listFonts(): Promise<CustomFont[]> {
   return (await get<CustomFont[]>("fonts", db())) ?? [];

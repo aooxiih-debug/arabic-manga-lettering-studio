@@ -36,3 +36,5 @@ use the editor.
 - Box geometry is stored as 0–1 fractions of the page and font size in source-image pixels, so the editor and exports scale identically.
 - The editor preview and exported images share `layoutBox`/`wrapLines` in `src/lib/text-layout.ts`; change text layout only there so on-screen and downloaded pages never drift apart.
 - Pages are processed sequentially by `src/lib/pipeline.ts` so each page can use previous lines for consistent names/tone; 429/402/403/401 stop the whole queue (429 shows the daily-limit message from `src/lib/ai/gemini-errors.ts`).
+- Magic Eraser results are saved as a separate `clean:` image per page (`getDisplayImage` in `src/lib/db.ts`) while `image:` keeps the untouched upload, so AI analysis and "show original" always see the source and erasing can be undone; the fill (`src/lib/inpaint.ts`) runs in the browser without AI.
+- Curved text is drawn by `drawBoxText` in `src/lib/text-layout.ts` (whole line rendered first, then laid along the arc in thin slices) so Arabic letters stay joined; the editor paints curved boxes with that same canvas code.

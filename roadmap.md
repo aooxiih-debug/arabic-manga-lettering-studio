@@ -11,3 +11,6 @@
 - [x] Prompt: simple MSA, natural manga dialogue, short lines, keep each character's tone
 - [x] 429 shows "Daily limit reached, try again tomorrow"
 - [ ] Verify a real page translates with Gemini — blocked: Google says the saved key is not valid
+- [x] Magic eraser: user paints an area, it is filled from the surrounding picture (in the browser)
+- [x] Rotate text boxes (handle + slider), same in downloads
+- [x] Curved Arabic text (arc slider), same in downloads

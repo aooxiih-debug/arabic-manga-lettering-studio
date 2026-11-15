@@ -92,9 +92,113 @@ export function shapeRadius(wPx: number, hPx: number) {
   return Math.min(wPx, hPx) * 0.18;
 }
 
+/** Draws one line bent along a circular arc. The line is rendered whole first (so Arabic letters stay joined), then laid down in thin slices. */
+function drawArcLine(
+  ctx: CanvasRenderingContext2D,
+  box: TextBox,
+  line: string,
+  lineCx: number,
+  lineY: number,
+  boxCx: number,
+  radius: number,
+  sign: number,
+  lineHeightPx: number,
+) {
+  const lw = ctx.measureText(line).width;
+  if (!lw) return;
+  const t = ctx.getTransform();
+  const res = Math.min(4, Math.max(1, Math.hypot(t.a, t.b)));
+  const sw = box.strokeWidth * 2;
+  const padX = Math.ceil(sw + 4);
+  const cw = Math.ceil(lw + padX * 2);
+  const chh = Math.ceil(Math.max(lineHeightPx, box.fontSize * 1.6) + sw * 2 + 8);
+  const off = document.createElement("canvas");
+  off.width = Math.ceil(cw * res);
+  off.height = Math.ceil(chh * res);
+  const o = off.getContext("2d")!;
+  o.scale(res, res);
+  o.font = ctx.font;
+  o.direction = "rtl";
+  o.textBaseline = "middle";
+  o.textAlign = "center";
+  if (box.strokeWidth > 0) {
+    o.lineJoin = "round";
+    o.lineWidth = sw;
+    o.strokeStyle = box.strokeColor;
+    o.strokeText(line, cw / 2, chh / 2);
+  }
+  o.fillStyle = box.color;
+  o.fillText(line, cw / 2, chh / 2);
+
+  const step = 2;
+  const left = lineCx - cw / 2;
+  for (let sx = 0; sx < cw; sx += step) {
+    const sliceW = Math.min(step, cw - sx);
+    const phi = (left + sx + sliceW / 2 - boxCx) / radius;
+    const px = boxCx + radius * Math.sin(phi);
+    const py = lineY + sign * radius * (1 - Math.cos(phi));
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(sign * phi);
+    ctx.drawImage(off, sx * res, 0, sliceW * res, off.height, -sliceW / 2, -chh / 2, sliceW + 0.5, chh);
+    ctx.restore();
+  }
+}
+
+/** Draws the box's lines (straight or curved) in source-image pixel coordinates, without the cover fill or rotation. */
+export function drawBoxText(ctx: CanvasRenderingContext2D, box: TextBox, layout: BoxLayout) {
+  const { x, y, w, h } = layout;
+  ctx.save();
+  ctx.font = fontString(box.fontFamily, box.bold, layout.fontPx);
+  ctx.direction = "rtl";
+  ctx.textBaseline = "middle";
+  const total = layout.lines.length * layout.lineHeightPx;
+  let lineY = y + (h - total) / 2 + layout.lineHeightPx / 2;
+  const curve = Math.max(-100, Math.min(100, box.curve ?? 0));
+
+  if (!curve) {
+    ctx.textAlign = box.align;
+    const anchorX = box.align === "right" ? x + w - layout.pad : box.align === "left" ? x + layout.pad : x + w / 2;
+    for (const line of layout.lines) {
+      if (box.strokeWidth > 0) {
+        ctx.lineJoin = "round";
+        ctx.lineWidth = box.strokeWidth * 2;
+        ctx.strokeStyle = box.strokeColor;
+        ctx.strokeText(line, anchorX, lineY);
+      }
+      ctx.fillStyle = box.color;
+      ctx.fillText(line, anchorX, lineY);
+      lineY += layout.lineHeightPx;
+    }
+  } else {
+    const theta = (Math.abs(curve) / 100) * Math.PI;
+    const sign = Math.sign(curve);
+    const radius = Math.max(1, w - layout.pad * 2) / theta;
+    const sag = radius * (1 - Math.cos(theta / 2));
+    // Keep the bent block visually centred: the arc's ends drop (or rise) by `sag`.
+    lineY -= (sign * sag) / 2;
+    const boxCx = x + w / 2;
+    for (const line of layout.lines) {
+      const lw = ctx.measureText(line).width;
+      const lineCx =
+        box.align === "right" ? x + w - layout.pad - lw / 2 : box.align === "left" ? x + layout.pad + lw / 2 : boxCx;
+      drawArcLine(ctx, box, line, lineCx, lineY, boxCx, radius, sign, layout.lineHeightPx);
+      lineY += layout.lineHeightPx;
+    }
+  }
+  ctx.restore();
+}
+
 export function drawBox(ctx: CanvasRenderingContext2D, box: TextBox, imgW: number, imgH: number) {
   const layout = layoutBox(box, imgW, imgH, ctx);
   const { x, y, w, h } = layout;
+  ctx.save();
+  const rot = ((box.rotation ?? 0) * Math.PI) / 180;
+  if (rot) {
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.rotate(rot);
+    ctx.translate(-(x + w / 2), -(y + h / 2));
+  }
   if (box.fill) {
     ctx.fillStyle = box.bg;
     if (box.shape === "ellipse") {
@@ -103,25 +207,7 @@ export function drawBox(ctx: CanvasRenderingContext2D, box: TextBox, imgW: numbe
     } else roundRectPath(ctx, x, y, w, h, shapeRadius(w, h));
     ctx.fill();
   }
-  ctx.save();
-  ctx.font = fontString(box.fontFamily, box.bold, layout.fontPx);
-  ctx.direction = "rtl";
-  ctx.textBaseline = "middle";
-  ctx.textAlign = box.align;
-  const anchorX = box.align === "right" ? x + w - layout.pad : box.align === "left" ? x + layout.pad : x + w / 2;
-  const total = layout.lines.length * layout.lineHeightPx;
-  let lineY = y + (h - total) / 2 + layout.lineHeightPx / 2;
-  for (const line of layout.lines) {
-    if (box.strokeWidth > 0) {
-      ctx.lineJoin = "round";
-      ctx.lineWidth = box.strokeWidth * 2;
-      ctx.strokeStyle = box.strokeColor;
-      ctx.strokeText(line, anchorX, lineY);
-    }
-    ctx.fillStyle = box.color;
-    ctx.fillText(line, anchorX, lineY);
-    lineY += layout.lineHeightPx;
-  }
+  drawBoxText(ctx, box, layout);
   ctx.restore();
 }
 

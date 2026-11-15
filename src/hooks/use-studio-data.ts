@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
-import { getChapter, getPageImage, getPages, listChapters, onDbChange } from "@/lib/db";
+import { getChapter, getDisplayImage, getPageImage, getPages, listChapters, onDbChange } from "@/lib/db";
 import { getPipelineState, subscribePipeline } from "@/lib/pipeline";
 import type { Chapter, Page } from "@/lib/types";
 
@@ -45,23 +45,37 @@ export function usePipeline() {
   return useSyncExternalStore(subscribePipeline, getPipelineState, getPipelineState);
 }
 
-/** Object URL for a stored page image, revoked on unmount. */
-export function usePageImageUrl(pageId: string | undefined) {
+/** Object URL for a stored page image (erased version by default), refreshed when the eraser changes it. */
+export function usePageImageUrl(pageId: string | undefined, variant: "display" | "original" = "display") {
   const [url, setUrl] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    if (!pageId) return;
+    const off = onDbChange((k) => k === `image:${pageId}` && setVersion((v) => v + 1));
+    return () => {
+      off();
+    };
+  }, [pageId]);
+  useEffect(() => {
+    setUrl(null);
+  }, [pageId, variant]);
   useEffect(() => {
     if (!pageId) return;
     let active = true;
     let created: string | null = null;
-    getPageImage(pageId).then((blob) => {
+    (variant === "original" ? getPageImage(pageId) : getDisplayImage(pageId)).then((blob) => {
       if (!active || !blob) return;
       created = URL.createObjectURL(blob);
       setUrl(created);
     });
     return () => {
       active = false;
-      if (created) URL.revokeObjectURL(created);
-      setUrl(null);
+      // Revoke after the next image has had time to load, so the page never flashes empty.
+      if (created) {
+        const old = created;
+        setTimeout(() => URL.revokeObjectURL(old), 3000);
+      }
     };
-  }, [pageId]);
+  }, [pageId, variant, version]);
   return url;
 }

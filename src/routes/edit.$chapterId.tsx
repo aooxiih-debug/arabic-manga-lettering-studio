@@ -6,11 +6,15 @@ import {
   Download,
   Eye,
   EyeOff,
+  Hand,
+  ImageOff,
   Loader2,
   Pipette,
   Plus,
   RotateCw,
+  Trash2,
   Undo2,
+  WandSparkles,
   X,
   ZoomIn,
   ZoomOut,
@@ -21,16 +25,29 @@ import { toast } from "sonner";
 import { BoxPanel, type PickTarget } from "@/components/studio/BoxPanel";
 import { PageCanvas, type CanvasMode } from "@/components/studio/PageCanvas";
 import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
 import { useChapter, usePageImageUrl, usePipeline } from "@/hooks/use-studio-data";
 import { registerCustomFonts } from "@/lib/custom-fonts";
-import { onDbChange, getPageImage, listFonts, saveFont, savePage } from "@/lib/db";
+import {
+  deleteCleanImage,
+  getCleanImage,
+  getDisplayImage,
+  listFonts,
+  onDbChange,
+  saveCleanImage,
+  saveFont,
+  savePage,
+} from "@/lib/db";
 import { downloadBlob, pageFileName, renderPage } from "@/lib/export";
 import { BUILTIN_FONTS, DEFAULT_FONT, type FontOption } from "@/lib/fonts";
 import { newId } from "@/lib/id";
+import { inpaint } from "@/lib/inpaint";
 import { contrastTextColor, imageToCanvas, loadImage, sampleColor } from "@/lib/image-utils";
 import { processPages } from "@/lib/pipeline";
 import { ensureFonts, fitFontSize } from "@/lib/text-layout";
 import type { Page, TextBox } from "@/lib/types";
+
+type HistoryEntry = { kind: "boxes"; boxes: TextBox[] } | { kind: "image"; blob: Blob | null };
 
 export const Route = createFileRoute("/edit/$chapterId")({
   validateSearch: (search: Record<string, unknown>) => ({ p: Math.max(0, Number(search['p']) || 0) }),
@@ -66,8 +83,15 @@ function EditorPage() {
   const [customFonts, setCustomFonts] = useState<FontOption[]>([]);
   const [downloading, setDownloading] = useState(false);
   const imageUrl = usePageImageUrl(page?.id);
+  const originalUrl = usePageImageUrl(showOriginal ? page?.id : undefined, "original");
+  const [eraseBrush, setEraseBrush] = useState(30);
+  const [panning, setPanning] = useState(false);
+  const [hasMask, setHasMask] = useState(false);
+  const [erasing, setErasing] = useState(false);
+  const [hasClean, setHasClean] = useState(false);
+  const maskRef = useRef<HTMLCanvasElement | null>(null);
 
-  const history = useRef<TextBox[][]>([]);
+  const history = useRef<HistoryEntry[]>([]);
   const lastPush = useRef(0);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSave = useRef<Page | null>(null);
@@ -124,7 +148,7 @@ function EditorPage() {
         if (!prev) return prev;
         const now = Date.now();
         if (forceHistory || now - lastPush.current > 700) {
-          history.current = [...history.current.slice(-40), prev.boxes];
+          history.current = [...history.current.slice(-40), { kind: "boxes", boxes: prev.boxes }];
         }
         lastPush.current = now;
         const next = { ...prev, boxes: fn(prev.boxes) };
@@ -142,19 +166,101 @@ function EditorPage() {
     [updateBoxes],
   );
 
-  function undo() {
+  useEffect(() => {
+    if (!page?.id) return;
+    let active = true;
+    const check = () => getCleanImage(page.id).then((b) => active && setHasClean(!!b));
+    void check();
+    const off = onDbChange((k) => k === `image:${page.id}` && void check());
+    return () => {
+      active = false;
+      off();
+    };
+  }, [page?.id]);
+
+  async function undo() {
     const prev = history.current.pop();
     if (!prev || !page) return;
-    const next = { ...page, boxes: prev };
+    if (prev.kind === "image") {
+      pixels.current = null;
+      if (prev.blob) await saveCleanImage(page.id, prev.blob);
+      else await deleteCleanImage(page.id);
+      toast.success("أُعيدت الصورة كما كانت");
+      return;
+    }
+    const next = { ...page, boxes: prev.boxes };
     setPage(next);
     pendingSave.current = next;
     flush();
   }
 
+  function clearMask() {
+    const c = maskRef.current;
+    c?.getContext("2d")?.clearRect(0, 0, c.width, c.height);
+    setHasMask(false);
+  }
+
+  function exitErase() {
+    clearMask();
+    setPanning(false);
+    setMode("select");
+  }
+
+  async function applyErase() {
+    const mask = maskRef.current;
+    if (!page || !mask) return;
+    setErasing(true);
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      const base = await getPixels();
+      if (!base) throw new Error("الصورة غير موجودة");
+      const { width: W, height: H } = base;
+      let mctx = mask.getContext("2d")!;
+      if (mask.width !== W || mask.height !== H) {
+        const scaled = document.createElement("canvas");
+        scaled.width = W;
+        scaled.height = H;
+        mctx = scaled.getContext("2d")!;
+        mctx.drawImage(mask, 0, 0, W, H);
+      }
+      const alpha = mctx.getImageData(0, 0, W, H).data;
+      const bits = new Uint8Array(W * H);
+      for (let i = 0; i < bits.length; i++) bits[i] = alpha[i * 4 + 3]! > 0 ? 1 : 0;
+      const out = new ImageData(new Uint8ClampedArray(base.data), W, H);
+      if (!inpaint(out, bits)) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = W;
+      canvas.height = H;
+      canvas.getContext("2d")!.putImageData(out, 0, 0);
+      const blob = await new Promise<Blob>((resolve, reject) =>
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("تعذّر حفظ الصورة"))), "image/png"),
+      );
+      const before = (await getCleanImage(page.id)) ?? null;
+      await saveCleanImage(page.id, blob);
+      pixels.current = { pageId: page.id, data: out };
+      history.current = [...history.current.slice(-40), { kind: "image", blob: before }];
+      clearMask();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "تعذّر المسح");
+    } finally {
+      setErasing(false);
+    }
+  }
+
+  async function restoreOriginalImage() {
+    if (!page) return;
+    const before = (await getCleanImage(page.id)) ?? null;
+    if (!before) return;
+    history.current = [...history.current.slice(-40), { kind: "image", blob: before }];
+    pixels.current = null;
+    await deleteCleanImage(page.id);
+    toast.success("أُعيدت الصورة الأصلية");
+  }
+
   async function getPixels() {
     if (!page) return null;
     if (pixels.current?.pageId === page.id) return pixels.current.data;
-    const blob = await getPageImage(page.id);
+    const blob = await getDisplayImage(page.id);
     if (!blob) return null;
     const img = await loadImage(blob);
     const { canvas, ctx } = imageToCanvas(img);
@@ -239,6 +345,7 @@ function EditorPage() {
 
   function goTo(i: number) {
     flush();
+    clearMask();
     navigate({ to: "/edit/$chapterId", params: { chapterId }, search: { p: i }, replace: true });
   }
 
@@ -292,13 +399,25 @@ function EditorPage() {
         </Button>
       </header>
 
-      {mode !== "select" && (
+      {mode !== "select" && mode !== "erase" && (
         <div className="flex items-center justify-between gap-2 bg-primary px-3 py-2 text-sm text-primary-foreground">
           <span className="flex items-center gap-2">
             {mode === "pick" ? <Pipette className="size-4" /> : <Plus className="size-4" />}
             {mode === "pick" ? "انقر على الصورة لالتقاط اللون" : "انقر مكان المربع الجديد على الصفحة"}
           </span>
           <button type="button" onClick={() => setMode("select")} aria-label="إلغاء" className="rounded p-1">
+            <X className="size-4" />
+          </button>
+        </div>
+      )}
+
+      {mode === "erase" && (
+        <div className="flex items-center justify-between gap-2 bg-primary px-3 py-2 text-sm text-primary-foreground">
+          <span className="flex items-center gap-2">
+            <WandSparkles className="size-4" />
+            {panning ? "حرّك الصفحة، ثم ارجع للفرشاة" : "لوّن فوق ما تريد مسحه ثم اضغط «امسح»"}
+          </span>
+          <button type="button" onClick={exitErase} aria-label="إغلاق الممحاة" className="rounded p-1">
             <X className="size-4" />
           </button>
         </div>
@@ -317,12 +436,16 @@ function EditorPage() {
         <div className="relative min-h-0 flex-1">
           <PageCanvas
             page={page}
-            imageUrl={imageUrl}
+            imageUrl={showOriginal ? (originalUrl ?? imageUrl) : imageUrl}
             selectedId={selectedId}
             mode={mode}
             zoom={zoom}
             showOriginal={showOriginal}
             fontsVersion={fontsVersion}
+            eraseBrush={eraseBrush}
+            erasePanning={panning}
+            maskRef={maskRef}
+            onMaskPaint={() => setHasMask(true)}
             onSelect={setSelectedId}
             onChangeBox={changeBox}
             onCommit={flush}
@@ -330,7 +453,52 @@ function EditorPage() {
           />
         </div>
 
-        {selected ? (
+        {mode === "erase" ? (
+          <div className="space-y-2 border-t border-border bg-surface px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] lg:w-80 lg:border-s lg:border-t-0 lg:py-4">
+            <div className="flex items-center gap-3">
+              <span className="shrink-0 text-xs text-muted-foreground">حجم الفرشاة</span>
+              <Slider
+                dir="rtl"
+                min={6}
+                max={120}
+                step={1}
+                value={[eraseBrush]}
+                onValueChange={([v]) => setEraseBrush(v ?? eraseBrush)}
+                aria-label="حجم الفرشاة"
+              />
+              <span
+                className="shrink-0 rounded-full bg-primary/60"
+                style={{ width: Math.min(32, eraseBrush / 2 + 4), height: Math.min(32, eraseBrush / 2 + 4) }}
+              />
+              <Button size="sm" variant="ember" onClick={() => void applyErase()} disabled={!hasMask || erasing}>
+                {erasing ? <Loader2 className="animate-spin" /> : <WandSparkles />}
+                امسح
+              </Button>
+            </div>
+            <div className="flex items-center justify-between gap-1 overflow-x-auto">
+              <ToolButton label="تحريك" active={panning} onClick={() => setPanning((v) => !v)}>
+                <Hand />
+              </ToolButton>
+              <ToolButton label="تصغير" disabled={zoom <= 0.5} onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.25).toFixed(2)))}>
+                <ZoomOut />
+              </ToolButton>
+              <ToolButton label="تكبير" disabled={zoom >= 4} onClick={() => setZoom((z) => Math.min(4, +(z + 0.25).toFixed(2)))}>
+                <ZoomIn />
+              </ToolButton>
+              <ToolButton label="تفريغ" disabled={!hasMask} onClick={clearMask}>
+                <Trash2 />
+              </ToolButton>
+              <ToolButton label="تراجع" disabled={!history.current.length || erasing} onClick={() => void undo()}>
+                <Undo2 />
+              </ToolButton>
+              {hasClean && (
+                <ToolButton label="الصورة الأصلية" disabled={erasing} onClick={() => void restoreOriginalImage()}>
+                  <ImageOff />
+                </ToolButton>
+              )}
+            </div>
+          </div>
+        ) : selected ? (
           <div className="lg:w-96">
             <BoxPanel
               key={selected.id}
@@ -373,10 +541,20 @@ function EditorPage() {
             <ToolButton label="إضافة نص" active={mode === "add"} onClick={() => setMode(mode === "add" ? "select" : "add")}>
               <Plus />
             </ToolButton>
+            <ToolButton
+              label="ممحاة سحرية"
+              onClick={() => {
+                setSelectedId(null);
+                setShowOriginal(false);
+                setMode("erase");
+              }}
+            >
+              <WandSparkles />
+            </ToolButton>
             <ToolButton label={showOriginal ? "الترجمة" : "الأصل"} active={showOriginal} onClick={() => setShowOriginal((v) => !v)}>
               {showOriginal ? <EyeOff /> : <Eye />}
             </ToolButton>
-            <ToolButton label="تراجع" disabled={!history.current.length} onClick={undo}>
+            <ToolButton label="تراجع" disabled={!history.current.length} onClick={() => void undo()}>
               <Undo2 />
             </ToolButton>
             <ToolButton label="تصغير" disabled={zoom <= 0.5} onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.25).toFixed(2)))}>

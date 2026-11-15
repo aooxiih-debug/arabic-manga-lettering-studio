@@ -25,6 +25,10 @@ export type TextBox = {
   strokeColor: string;
   /** Text outline width in source-image pixels; 0 disables it. */
   strokeWidth: number;
+  /** Clockwise rotation in degrees around the box centre; missing means 0. */
+  rotation?: number;
+  /** Arc bend of each line, -100..100 (positive bows upward); missing means straight. */
+  curve?: number;
 };
 
 export type PageStatus = "pending" | "processing" | "done" | "error";

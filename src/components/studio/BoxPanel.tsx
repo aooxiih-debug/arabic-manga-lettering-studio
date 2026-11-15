@@ -8,6 +8,7 @@ import {
   Maximize2,
   Pipette,
   RectangleHorizontal,
+  RotateCcw,
   Trash2,
   Upload,
   X,
@@ -210,6 +211,38 @@ export function BoxPanel({
                 onValueCommit={onCommit}
                 className="max-w-[14rem]"
               />
+            </Row>
+            <Row label={`الانحناء ${box.curve ?? 0}`}>
+              <Slider
+                dir="rtl"
+                min={-100}
+                max={100}
+                step={1}
+                value={[box.curve ?? 0]}
+                onValueChange={([v]) => onChange({ curve: v ?? 0 })}
+                onValueCommit={onCommit}
+                className="max-w-[12rem]"
+                aria-label="انحناء النص"
+              />
+              <Button variant="tool" size="icon" onClick={() => set({ curve: 0 })} aria-label="إلغاء الانحناء">
+                <RotateCcw />
+              </Button>
+            </Row>
+            <Row label={`التدوير ${box.rotation ?? 0}°`}>
+              <Slider
+                dir="rtl"
+                min={-180}
+                max={180}
+                step={1}
+                value={[box.rotation ?? 0]}
+                onValueChange={([v]) => onChange({ rotation: v ?? 0 })}
+                onValueCommit={onCommit}
+                className="max-w-[12rem]"
+                aria-label="تدوير المربع"
+              />
+              <Button variant="tool" size="icon" onClick={() => set({ rotation: 0 })} aria-label="إلغاء التدوير">
+                <RotateCcw />
+              </Button>
             </Row>
             <Row label="المحاذاة">
               {(
